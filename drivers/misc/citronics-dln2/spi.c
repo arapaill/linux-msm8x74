@@ -974,7 +974,12 @@ static int dln2_spi_probe(struct platform_device *pdev)
 		goto exit_free_host;
 	}
 
-	host->bus_num = -1;
+	/*
+	 * Number the buses by port (spi0, spi1), so that /dev/spidevB.C does not
+	 * depend on which port finished probing first; dynamic numbering if
+	 * the number is already used.
+	 */
+	host->bus_num = dln2->port;
 	host->mode_bits = SPI_CPOL | SPI_CPHA;
 	host->prepare_message = dln2_spi_prepare_message;
 	host->transfer_one = dln2_spi_transfer_one;
@@ -994,6 +999,10 @@ static int dln2_spi_probe(struct platform_device *pdev)
 	pm_runtime_enable(&pdev->dev);
 
 	ret = spi_register_controller(host);
+	if (ret == -EBUSY) {
+		host->bus_num = -1;
+		ret = spi_register_controller(host);
+	}
 	if (ret < 0) {
 		dev_err(&pdev->dev, "Failed to register host\n");
 		goto exit_register;
