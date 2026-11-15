@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config CITRONICS_DLN2
+	tristate "Citronics Limeboard I/O"
+	depends on USB && GPIOLIB && I2C && SPI_MASTER && IIO
+	select MFD_CORE
+	select GPIOLIB_IRQCHIP
+	select IIO_BUFFER
+	select IIO_TRIGGERED_BUFFER
+	help
+	  The Limeboard's STM32 running the Limeboard I/O firmware: its
+	  Raspberry Pi style header as a GPIO chip, I2C and SPI buses and
+	  an ADC. The firmware speaks the Diolan DLN-2 protocol; this is
+	  the kernel's DLN-2 driver set as one separate module that binds
+	  to the firmware's USB ID only.
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called citronics-dln2.
