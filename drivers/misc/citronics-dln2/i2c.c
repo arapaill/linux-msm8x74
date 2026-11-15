@@ -184,12 +184,38 @@ static const struct i2c_adapter_quirks dln2_i2c_quirks = {
 	.max_write_len = DLN2_I2C_MAX_XFER_SIZE,
 };
 
+/*
+ * The ports to add as I2C adapters, e.g. "0,1"; all when empty, none with
+ * "-1". A board can keep a port's pins free for other uses this way.
+ */
+static int dln2_i2c_ports[4];
+static unsigned int dln2_i2c_nports;
+module_param_array_named(i2c_ports, dln2_i2c_ports, int, &dln2_i2c_nports, 0444);
+MODULE_PARM_DESC(i2c_ports, "I2C ports to add (default: all; -1: none)");
+
+static bool dln2_i2c_port_enabled(u8 port)
+{
+	unsigned int i;
+
+	if (!dln2_i2c_nports)
+		return true;
+	for (i = 0; i < dln2_i2c_nports; i++)
+		if (dln2_i2c_ports[i] == port)
+			return true;
+	return false;
+}
+
 static int dln2_i2c_probe(struct platform_device *pdev)
 {
 	int ret;
 	struct dln2_i2c *dln2;
 	struct device *dev = &pdev->dev;
 	struct dln2_platform_data *pdata = dev_get_platdata(&pdev->dev);
+
+	if (!dln2_i2c_port_enabled(pdata->port)) {
+		dev_info(dev, "port %u not enabled\n", pdata->port);
+		return -ENODEV;
+	}
 
 	dln2 = devm_kzalloc(dev, sizeof(*dln2), GFP_KERNEL);
 	if (!dln2)
