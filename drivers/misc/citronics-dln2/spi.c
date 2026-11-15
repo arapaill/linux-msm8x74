@@ -685,20 +685,26 @@ static int dln2_spi_transfer_one(struct spi_controller *host,
  * firmware description of what is wired to it, so they are given here as
  * "<modalias>[,irq=<gpio>][,speed=<hz>][,mode=<0-3>]": a driver's device
  * name, "spidev" for /dev/spidevB.C, or "none". irq=<gpio> is a line of the
- * adapter's own GPIO chip.
+ * adapter's own GPIO chip. spi<P>_cs<C> is chip select C of port P.
  */
+#define DLN2_SPI_MAX_PORTS 2
 #define DLN2_SPI_MAX_CS 4
-static char *dln2_spi_cs[DLN2_SPI_MAX_CS] = {
-	"spidev", "spidev", "spidev", "spidev"
+static char *dln2_spi_cs[DLN2_SPI_MAX_PORTS][DLN2_SPI_MAX_CS] = {
+	{ "spidev", "spidev", "spidev", "spidev" },
+	{ "spidev", "spidev", "spidev", "spidev" },
 };
-module_param_named(cs0, dln2_spi_cs[0], charp, 0444);
-MODULE_PARM_DESC(cs0, "Device on chip select 0 (default: spidev)");
-module_param_named(cs1, dln2_spi_cs[1], charp, 0444);
-MODULE_PARM_DESC(cs1, "Device on chip select 1 (default: spidev)");
-module_param_named(cs2, dln2_spi_cs[2], charp, 0444);
-MODULE_PARM_DESC(cs2, "Device on chip select 2 (default: spidev)");
-module_param_named(cs3, dln2_spi_cs[3], charp, 0444);
-MODULE_PARM_DESC(cs3, "Device on chip select 3 (default: spidev)");
+#define DLN2_SPI_CS_PARAM(p, c)						\
+	module_param_named(spi##p##_cs##c, dln2_spi_cs[p][c], charp, 0444); \
+	MODULE_PARM_DESC(spi##p##_cs##c,					\
+			 "Device on port " #p " chip select " #c " (default: spidev)")
+DLN2_SPI_CS_PARAM(0, 0);
+DLN2_SPI_CS_PARAM(0, 1);
+DLN2_SPI_CS_PARAM(0, 2);
+DLN2_SPI_CS_PARAM(0, 3);
+DLN2_SPI_CS_PARAM(1, 0);
+DLN2_SPI_CS_PARAM(1, 1);
+DLN2_SPI_CS_PARAM(1, 2);
+DLN2_SPI_CS_PARAM(1, 3);
 
 struct dln2_spi_cs_config {
 	struct spi_board_info info;
@@ -706,9 +712,10 @@ struct dln2_spi_cs_config {
 };
 
 /* Returns 1 with *cfg filled, 0 for "none", or an error */
-static int dln2_spi_parse_cs(struct device *dev, unsigned int cs,
+static int dln2_spi_parse_cs(struct device *dev, u8 port, unsigned int cs,
 			     struct dln2_spi_cs_config *cfg)
 {
+	const char *param = port < DLN2_SPI_MAX_PORTS ? dln2_spi_cs[port][cs] : "spidev";
 	char *buf, *p, *tok;
 	int ret = 1;
 
@@ -716,9 +723,9 @@ static int dln2_spi_parse_cs(struct device *dev, unsigned int cs,
 	cfg->irq_gpio = -1;
 	cfg->info.chip_select = cs;
 
-	if (!dln2_spi_cs[cs])
+	if (!param)
 		return 0;
-	buf = kstrdup(dln2_spi_cs[cs], GFP_KERNEL);
+	buf = kstrdup(param, GFP_KERNEL);
 	if (!buf)
 		return -ENOMEM;
 
@@ -749,7 +756,7 @@ static int dln2_spi_parse_cs(struct device *dev, unsigned int cs,
 	}
 out:
 	if (ret == -EINVAL)
-		dev_err(dev, "cs%u: invalid device \"%s\"\n", cs, dln2_spi_cs[cs]);
+		dev_err(dev, "spi%u_cs%u: invalid device \"%s\"\n", port, cs, param);
 	kfree(buf);
 	return ret;
 }
@@ -789,7 +796,7 @@ static int dln2_spi_add_devices(struct platform_device *pdev,
 
 		spi = spi_new_device(host, &cfg->info);
 		if (!spi) {
-			dev_err(&pdev->dev, "cs%u: cannot add %s\n", cs,
+			dev_err(&pdev->dev, "chip select %u: cannot add %s\n", cs,
 				cfg->info.modalias);
 			continue;
 		}
@@ -823,14 +830,14 @@ static int dln2_spi_probe(struct platform_device *pdev)
 	if (!cfgs)
 		return -ENOMEM;
 	for (cs = 0; cs < DLN2_SPI_MAX_CS; cs++) {
-		ret = dln2_spi_parse_cs(dev, cs, &cfgs[cs]);
+		ret = dln2_spi_parse_cs(dev, pdata->port, cs, &cfgs[cs]);
 		if (ret < 0)
 			return ret;
 		if (ret > 0 && cfgs[cs].irq_gpio >= 0) {
 			ret = dln2_spi_gpio_irq(pdev, cfgs[cs].irq_gpio);
 			if (ret < 0)
-				return dev_err_probe(dev, ret, "cs%u: no irq for gpio %d\n",
-						     cs, cfgs[cs].irq_gpio);
+				return dev_err_probe(dev, ret, "spi%u_cs%u: no irq for gpio %d\n",
+						     pdata->port, cs, cfgs[cs].irq_gpio);
 			cfgs[cs].info.irq = ret;
 		}
 	}
