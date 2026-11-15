@@ -5,8 +5,11 @@
  * Copyright (c) 2014 Intel Corporation
  */
 
+#include <linux/clk-provider.h>
+#include <linux/clkdev.h>
 #include <linux/gpio/consumer.h>
 #include <linux/gpio/driver.h>
+#include <linux/irq.h>
 #include <linux/kernel.h>
 #include <linux/kmod.h>
 #include <linux/module.h>
@@ -683,9 +686,12 @@ static int dln2_spi_transfer_one(struct spi_controller *host,
 /*
  * The devices on the chip selects. A DLN-2 adapter appears over USB, with no
  * firmware description of what is wired to it, so they are given here as
- * "<modalias>[,irq=<gpio>][,speed=<hz>][,mode=<0-3>]": a driver's device
- * name, "spidev" for /dev/spidevB.C, or "none". irq=<gpio> is a line of the
- * adapter's own GPIO chip. spi<P>_cs<C> is chip select C of port P.
+ * "<modalias>[,irq=<gpio>][,trigger=<type>][,clock=<hz>][,speed=<hz>]
+ * [,mode=<0-3>]": a driver's device name, "spidev" for /dev/spidevB.C, or
+ * "none". irq=<gpio> is a line of the adapter's own GPIO chip, triggered
+ * on a low level unless trigger= says high, falling, rising or both.
+ * clock=<hz> is the chip's oscillator, given to its driver as a fixed-rate
+ * clock. spi<P>_cs<C> is chip select C of port P.
  */
 #define DLN2_SPI_MAX_PORTS 2
 #define DLN2_SPI_MAX_CS 4
@@ -709,7 +715,33 @@ DLN2_SPI_CS_PARAM(1, 3);
 struct dln2_spi_cs_config {
 	struct spi_board_info info;
 	int irq_gpio;
+	unsigned int irq_type;
+	u32 clock_hz;
 };
+
+static const struct {
+	const char *name;
+	unsigned int type;
+} dln2_spi_triggers[] = {
+	{ "low", IRQ_TYPE_LEVEL_LOW },
+	{ "high", IRQ_TYPE_LEVEL_HIGH },
+	{ "falling", IRQ_TYPE_EDGE_FALLING },
+	{ "rising", IRQ_TYPE_EDGE_RISING },
+	{ "both", IRQ_TYPE_EDGE_BOTH },
+};
+
+static int dln2_spi_parse_trigger(const char *name, unsigned int *type)
+{
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(dln2_spi_triggers); i++) {
+		if (!strcmp(name, dln2_spi_triggers[i].name)) {
+			*type = dln2_spi_triggers[i].type;
+			return 0;
+		}
+	}
+	return -EINVAL;
+}
 
 /* Returns 1 with *cfg filled, 0 for "none", or an error */
 static int dln2_spi_parse_cs(struct device *dev, u8 port, unsigned int cs,
@@ -721,6 +753,7 @@ static int dln2_spi_parse_cs(struct device *dev, u8 port, unsigned int cs,
 
 	memset(cfg, 0, sizeof(*cfg));
 	cfg->irq_gpio = -1;
+	cfg->irq_type = IRQ_TYPE_LEVEL_LOW;
 	cfg->info.chip_select = cs;
 
 	if (!param)
@@ -751,6 +784,11 @@ static int dln2_spi_parse_cs(struct device *dev, u8 port, unsigned int cs,
 		else if (strstarts(tok, "mode=") && !kstrtou32(tok + 5, 0, &val) &&
 			 val <= 3)
 			cfg->info.mode = val;
+		else if (strstarts(tok, "clock=") && !kstrtou32(tok + 6, 0, &val) && val)
+			cfg->clock_hz = val;
+		else if (strstarts(tok, "trigger=") &&
+			 !dln2_spi_parse_trigger(tok + 8, &cfg->irq_type))
+			;
 		else
 			ret = -EINVAL;
 	}
@@ -761,6 +799,12 @@ out:
 	return ret;
 }
 
+/* The GPIO chip of the same adapter: its device is a sibling of ours */
+static int dln2_spi_match_gpio(struct gpio_chip *gc, const void *adapter)
+{
+	return gc->parent && gc->parent->parent == adapter;
+}
+
 /* The Linux interrupt of line @gpio of the adapter's GPIO chip */
 static int dln2_spi_gpio_irq(struct platform_device *pdev, unsigned int gpio)
 {
@@ -768,7 +812,7 @@ static int dln2_spi_gpio_irq(struct platform_device *pdev, unsigned int gpio)
 	struct gpio_desc *desc;
 	int irq;
 
-	gdev = gpio_device_find_by_label("dln2");
+	gdev = gpio_device_find(pdev->dev.parent, dln2_spi_match_gpio);
 	if (!gdev)
 		return -EPROBE_DEFER;
 
@@ -776,6 +820,34 @@ static int dln2_spi_gpio_irq(struct platform_device *pdev, unsigned int gpio)
 	irq = IS_ERR(desc) ? PTR_ERR(desc) : gpiod_to_irq(desc);
 	gpio_device_put(gdev);
 	return irq;
+}
+
+/*
+ * The chip's oscillator as a fixed-rate clock, looked up by the name the
+ * device will have (spi<bus>.<cs>), so that its driver's clk_get() finds it.
+ */
+static int dln2_spi_add_clock(struct platform_device *pdev,
+			      struct spi_controller *host, unsigned int cs, u32 hz)
+{
+	struct device *dev = &pdev->dev;
+	const char *dev_id, *name;
+	struct clk_hw *hw;
+	int ret;
+
+	dev_id = devm_kasprintf(dev, GFP_KERNEL, "%s.%u", dev_name(&host->dev), cs);
+	name = devm_kasprintf(dev, GFP_KERNEL, "%s-osc", dev_id);
+	if (!dev_id || !name)
+		return -ENOMEM;
+
+	hw = devm_clk_hw_register_fixed_rate(dev, name, NULL, 0, hz);
+	if (IS_ERR(hw))
+		ret = PTR_ERR(hw);
+	else
+		ret = devm_clk_hw_register_clkdev(dev, hw, NULL, dev_id);
+	if (ret)
+		dev_err(dev, "chip select %u: cannot add its %u Hz clock: %d\n",
+			cs, hz, ret);
+	return ret;
 }
 
 static int dln2_spi_add_devices(struct platform_device *pdev,
@@ -793,6 +865,8 @@ static int dln2_spi_add_devices(struct platform_device *pdev,
 			continue;
 		if (!cfg->info.max_speed_hz)
 			cfg->info.max_speed_hz = host->max_speed_hz;
+		if (cfg->clock_hz && dln2_spi_add_clock(pdev, host, cs, cfg->clock_hz))
+			continue;
 
 		spi = spi_new_device(host, &cfg->info);
 		if (!spi) {
@@ -839,6 +913,7 @@ static int dln2_spi_probe(struct platform_device *pdev)
 				return dev_err_probe(dev, ret, "spi%u_cs%u: no irq for gpio %d\n",
 						     pdata->port, cs, cfgs[cs].irq_gpio);
 			cfgs[cs].info.irq = ret;
+			irq_set_irq_type(ret, cfgs[cs].irq_type);
 		}
 	}
 
