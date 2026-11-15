@@ -37,6 +37,10 @@ struct dln2_response {
 
 #define DLN2_GENERIC_MODULE_ID		0x00
 #define DLN2_GENERIC_CMD(cmd)		DLN2_CMD(cmd, DLN2_GENERIC_MODULE_ID)
+#define DLN2_SPI_MODULE_ID		0x02
+#define DLN2_I2C_MODULE_ID		0x03
+#define DLN2_GET_PORT_COUNT(id)		DLN2_CMD(0x00, id)
+#define DLN2_MAX_PORTS			4
 #define CMD_GET_DEVICE_VER		DLN2_GENERIC_CMD(0x30)
 #define CMD_GET_DEVICE_SN		DLN2_GENERIC_CMD(0x31)
 
@@ -659,7 +663,7 @@ static struct mfd_cell_acpi_match dln2_acpi_match_gpio = {
 	.adr = DLN2_ACPI_MATCH_GPIO,
 };
 
-/* Only one I2C port seems to be supported on current hardware */
+/* Port 0; the ports the adapter reports are added at probe */
 static struct dln2_platform_data dln2_pdata_i2c = {
 	.handle = DLN2_HANDLE_I2C,
 	.port = 0,
@@ -669,7 +673,7 @@ static struct mfd_cell_acpi_match dln2_acpi_match_i2c = {
 	.adr = DLN2_ACPI_MATCH_I2C,
 };
 
-/* Only one SPI port supported */
+/* Port 0; the ports the adapter reports are added at probe */
 static struct dln2_platform_data dln2_pdata_spi = {
 	.handle = DLN2_HANDLE_SPI,
 	.port = 0,
@@ -715,6 +719,76 @@ static const struct mfd_cell dln2_devs[] = {
 		.pdata_size = sizeof(struct dln2_platform_data),
 	},
 };
+
+/* The number of ports of a module, 1 when the adapter cannot tell */
+static unsigned int dln2_port_count(struct dln2_dev *dln2, u16 handle, u8 module)
+{
+	u8 count;
+	unsigned int len = sizeof(count);
+	int ret;
+
+	ret = _dln2_transfer(dln2, handle, DLN2_GET_PORT_COUNT(module), NULL, 0,
+			     &count, &len);
+	if (ret < 0 || len < sizeof(count) || !count)
+		return 1;
+	return min_t(unsigned int, count, DLN2_MAX_PORTS);
+}
+
+/*
+ * The cells: GPIO, a cell for each I2C and SPI port, and ADC. Only port 0
+ * cells have an ACPI match.
+ */
+static int dln2_add_devices(struct dln2_dev *dln2)
+{
+	static const struct {
+		const struct mfd_cell *cell;
+		const struct dln2_platform_data *pdata;
+		u16 handle;
+		u8 module;
+	} buses[] = {
+		{ &dln2_devs[1], &dln2_pdata_i2c, DLN2_HANDLE_I2C, DLN2_I2C_MODULE_ID },
+		{ &dln2_devs[2], &dln2_pdata_spi, DLN2_HANDLE_SPI, DLN2_SPI_MODULE_ID },
+	};
+	struct dln2_platform_data *pdata;
+	struct mfd_cell *cells;
+	unsigned int n = 0, b, port;
+	int ret;
+
+	cells = kcalloc(2 + ARRAY_SIZE(buses) * DLN2_MAX_PORTS, sizeof(*cells),
+			GFP_KERNEL);
+	pdata = kcalloc(ARRAY_SIZE(buses) * DLN2_MAX_PORTS, sizeof(*pdata),
+			GFP_KERNEL);
+	if (!cells || !pdata) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	cells[n++] = dln2_devs[0];
+	for (b = 0; b < ARRAY_SIZE(buses); b++) {
+		unsigned int ports = dln2_port_count(dln2, buses[b].handle,
+						     buses[b].module);
+
+		for (port = 0; port < ports; port++) {
+			struct dln2_platform_data *pd = &pdata[b * DLN2_MAX_PORTS + port];
+
+			*pd = *buses[b].pdata;
+			pd->port = port;
+			cells[n] = *buses[b].cell;
+			cells[n].platform_data = pd;
+			if (port)
+				cells[n].acpi_match = NULL;
+			n++;
+		}
+	}
+	cells[n++] = dln2_devs[3];
+
+	/* mfd copies the cells and their platform data */
+	ret = mfd_add_hotplug_devices(&dln2->interface->dev, cells, n);
+out:
+	kfree(pdata);
+	kfree(cells);
+	return ret;
+}
 
 static void dln2_stop(struct dln2_dev *dln2)
 {
@@ -814,7 +888,7 @@ static int dln2_probe(struct usb_interface *interface,
 		goto out_stop_rx;
 	}
 
-	ret = mfd_add_hotplug_devices(dev, dln2_devs, ARRAY_SIZE(dln2_devs));
+	ret = dln2_add_devices(dln2);
 	if (ret != 0) {
 		dev_err(dev, "failed to add mfd devices to core\n");
 		goto out_stop_rx;
