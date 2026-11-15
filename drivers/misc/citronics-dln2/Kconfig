@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 config CITRONICS_DLN2
 	tristate "Citronics Limeboard I/O"
-	depends on USB && GPIOLIB && I2C && SPI_MASTER && IIO
+	depends on USB && GPIOLIB && I2C && SPI_MASTER && IIO && COMMON_CLK
 	select MFD_CORE
 	select GPIOLIB_IRQCHIP
 	select IIO_BUFFER
