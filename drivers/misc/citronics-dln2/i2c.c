@@ -186,23 +186,26 @@ static const struct i2c_adapter_quirks dln2_i2c_quirks = {
 
 /*
  * The ports to add as I2C adapters, e.g. "0,1"; all when empty, none with
- * "-1". A board can keep a port's pins free for other uses this way.
+ * "-1". A board can keep a port's pins free for other uses this way. A change
+ * applies when the port's device binds again (unbind and bind in sysfs).
  */
 static int dln2_i2c_ports[4];
 static unsigned int dln2_i2c_nports;
-module_param_array_named(i2c_ports, dln2_i2c_ports, int, &dln2_i2c_nports, 0444);
+module_param_array_named(i2c_ports, dln2_i2c_ports, int, &dln2_i2c_nports, 0644);
 MODULE_PARM_DESC(i2c_ports, "I2C ports to add (default: all; -1: none)");
 
 static bool dln2_i2c_port_enabled(u8 port)
 {
 	unsigned int i;
+	bool enabled;
 
-	if (!dln2_i2c_nports)
-		return true;
+	kernel_param_lock(THIS_MODULE);
+	enabled = !dln2_i2c_nports;
 	for (i = 0; i < dln2_i2c_nports; i++)
 		if (dln2_i2c_ports[i] == port)
-			return true;
-	return false;
+			enabled = true;
+	kernel_param_unlock(THIS_MODULE);
+	return enabled;
 }
 
 static int dln2_i2c_probe(struct platform_device *pdev)

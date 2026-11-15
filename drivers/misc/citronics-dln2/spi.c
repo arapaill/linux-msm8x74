@@ -691,7 +691,8 @@ static int dln2_spi_transfer_one(struct spi_controller *host,
  * "none". irq=<gpio> is a line of the adapter's own GPIO chip, triggered
  * on a low level unless trigger= says high, falling, rising or both.
  * clock=<hz> is the chip's oscillator, given to its driver as a fixed-rate
- * clock. spi<P>_cs<C> is chip select C of port P.
+ * clock. spi<P>_cs<C> is chip select C of port P. A change applies when the
+ * port's device binds again (unbind and bind in sysfs).
  */
 #define DLN2_SPI_MAX_PORTS 2
 #define DLN2_SPI_MAX_CS 4
@@ -700,7 +701,7 @@ static char *dln2_spi_cs[DLN2_SPI_MAX_PORTS][DLN2_SPI_MAX_CS] = {
 	{ "spidev", "spidev", "spidev", "spidev" },
 };
 #define DLN2_SPI_CS_PARAM(p, c)						\
-	module_param_named(spi##p##_cs##c, dln2_spi_cs[p][c], charp, 0444); \
+	module_param_named(spi##p##_cs##c, dln2_spi_cs[p][c], charp, 0644); \
 	MODULE_PARM_DESC(spi##p##_cs##c,					\
 			 "Device on port " #p " chip select " #c " (default: spidev)")
 DLN2_SPI_CS_PARAM(0, 0);
@@ -747,8 +748,9 @@ static int dln2_spi_parse_trigger(const char *name, unsigned int *type)
 static int dln2_spi_parse_cs(struct device *dev, u8 port, unsigned int cs,
 			     struct dln2_spi_cs_config *cfg)
 {
-	const char *param = port < DLN2_SPI_MAX_PORTS ? dln2_spi_cs[port][cs] : "spidev";
+	const char *param;
 	char *buf, *p, *tok;
+	bool none;
 	int ret = 1;
 
 	memset(cfg, 0, sizeof(*cfg));
@@ -756,9 +758,14 @@ static int dln2_spi_parse_cs(struct device *dev, u8 port, unsigned int cs,
 	cfg->irq_type = IRQ_TYPE_LEVEL_LOW;
 	cfg->info.chip_select = cs;
 
-	if (!param)
+	/* The parameters can be written at runtime: copy under their lock */
+	kernel_param_lock(THIS_MODULE);
+	param = port < DLN2_SPI_MAX_PORTS ? dln2_spi_cs[port][cs] : "spidev";
+	none = !param;
+	buf = param ? kstrdup(param, GFP_KERNEL) : NULL;
+	kernel_param_unlock(THIS_MODULE);
+	if (none)
 		return 0;
-	buf = kstrdup(param, GFP_KERNEL);
 	if (!buf)
 		return -ENOMEM;
 
