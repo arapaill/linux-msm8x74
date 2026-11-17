@@ -249,13 +249,13 @@ after hours of mainline-side theorizing.
 
 Every maintained integration branch is kept up to date with its own mainline
 LTS branch automatically by `.github/workflows/stable-sync.yml` (scheduled):
-`6.12/{baseline,staging,rc,release}` from `linux-6.12.y` and
+`6.12/{baseline,staging,rc}` from `linux-6.12.y` and
 `6.18/{baseline,staging,rc}` from `linux-6.18.y`. It fetches the stable branch
 and merges it, pushing on a clean merge. A conflict fails that branch's job,
 names the files and leaves the branch untouched: merge stable into it by hand.
-After a merge into an `rc` branch or `6.12/release` it requests the
-citronics-kernel package build itself (its pushes cannot trigger
-notify-kernel-build). Rationale: security fixes must not wait for the next
-manual integration round; a stable merge is the one case where `rc` and
-`release` move without a full §1.1 revalidation — follow up with an
-on-device check when convenient.
+After a merge into an `rc` branch it requests the citronics-kernel package
+build itself (its pushes cannot trigger notify-kernel-build), so every stable
+update is published as an experimental rc kernel. Rationale: security fixes
+must not wait for the next manual integration round; a stable merge is the
+one case where `rc` moves without a full §1.1 revalidation. `release` never
+moves automatically: it is promoted from a validated `rc` by hand.

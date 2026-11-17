@@ -8,10 +8,11 @@ name: stable-sync
 # conflict on one never holds back the others.
 #
 # A push made with GITHUB_TOKEN does not trigger other workflows, so
-# notify-kernel-build never sees these merges: after a merge into a branch
-# citronics-kernel builds from (the rc branches and 6.12/release) this
-# workflow asks citronics-kernel to build the packages itself. A stable merge
-# into 6.12/release reaches devices without an rc round (AGENTS.md section 5).
+# notify-kernel-build never sees these merges: after a merge into an rc
+# branch this workflow asks citronics-kernel to build the packages itself, so
+# every stable update becomes an experimental rc kernel. Release branches are
+# never touched here: promoting an rc to release is a manual step, taken once
+# the rc has been validated on a device (AGENTS.md section 1.1).
 # That needs the KERNEL_DISPATCH_TOKEN secret, a token allowed to send
 # repository_dispatch to Citronics/citronics-kernel (Contents: write).
 
@@ -40,8 +41,6 @@ jobs:
           - branch: '6.12/staging'
             stable: 'linux-6.12.y'
           - branch: '6.12/rc'
-            stable: 'linux-6.12.y'
-          - branch: '6.12/release'
             stable: 'linux-6.12.y'
           - branch: '6.18/baseline'
             stable: 'linux-6.18.y'
@@ -98,7 +97,7 @@ jobs:
         run: git push origin HEAD:${{ matrix.branch }}
 
       - name: Request the kernel package build
-        if: steps.merge.outputs.result == 'merged' && (endsWith(matrix.branch, '/rc') || endsWith(matrix.branch, '/release'))
+        if: steps.merge.outputs.result == 'merged' && endsWith(matrix.branch, '/rc')
         env:
           KERNEL_DISPATCH_TOKEN: ${{ secrets.KERNEL_DISPATCH_TOKEN }}
         run: |
