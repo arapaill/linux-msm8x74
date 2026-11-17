@@ -21,6 +21,7 @@ properties:
           - qcom,ipq8074-dwc3
           - qcom,ipq9574-dwc3
           - qcom,msm8953-dwc3
+          - qcom,msm8974-dwc3
           - qcom,msm8994-dwc3
           - qcom,msm8996-dwc3
           - qcom,msm8998-dwc3
@@ -97,6 +98,11 @@ properties:
 
   interconnects:
     maxItems: 2
+
+  vbus-supply:
+    description:
+      Regulator supplying VBUS to the port. It is enabled while the extcon
+      reports host mode.
 
   interconnect-names:
     items:
@@ -191,6 +197,29 @@ allOf:
         clock-names:
           items:
             - const: core
+
+  - if:
+      properties:
+        compatible:
+          contains:
+            enum:
+              - qcom,msm8974-dwc3
+    then:
+      properties:
+        clocks:
+          maxItems: 5
+        clock-names:
+          items:
+            - const: iface
+            - const: core
+            - const: sleep
+            - const: mock_utmi
+            - const: phy_sleep
+        interrupts:
+          maxItems: 1
+        interrupt-names:
+          items:
+            - const: hs_phy_irq
 
   - if:
       properties:
