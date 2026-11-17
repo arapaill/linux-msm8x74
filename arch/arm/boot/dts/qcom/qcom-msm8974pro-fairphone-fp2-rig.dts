@@ -238,3 +238,55 @@
 &saw_l2 {
 	memory-region = <&spm_trace>;
 };
+
+/*
+ * The carrier wires two USB ports of the mainboard: the micro-USB lines go to
+ * its hub (or, in debug mode, to the USB-C connector) and the expansion-port
+ * lines go to one USB-A connector of their own.  The HS controller can only
+ * drive one PHY at a time, so it takes the secondary PHY as a host and the
+ * USB3 controller takes over the primary port, at high speed.
+ */
+&usb {
+	phys = <&usb_hs2_phy>;
+	phy-select = <&tcsr 0xb000 1>;
+	dr_mode = "host";
+
+	/delete-property/ extcon;
+	/delete-property/ vbus-supply;
+};
+
+&usb_hs1_phy {
+	status = "disabled";
+};
+
+&usb_hs2_phy {
+	status = "okay";
+
+	v1p8-supply = <&pm8941_l6>;
+	v3p3-supply = <&pm8941_l24>;
+
+	qcom,init-seq = /bits/ 8 <0x1 0x63>;
+};
+
+&usb3 {
+	status = "okay";
+
+	extcon = <&smbb>, <&usb_id>;
+	vbus-supply = <&chg_otg>;
+};
+
+&usb3_dwc3 {
+	extcon = <&usb_id>;
+	maximum-speed = "high-speed";
+};
+
+&usb3_hs_phy {
+	status = "okay";
+
+	v1p8-supply = <&pm8941_l6>;
+	v3p3-supply = <&pm8941_l24>;
+};
+
+&usb3_ss_phy {
+	status = "okay";
+};
