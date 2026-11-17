@@ -1379,13 +1379,15 @@ static int qcom_iommu_device_probe(struct platform_device *pdev)
 	    !qcom_iommu->nonsecure) {
 		ret = pm_runtime_resume_and_get(dev);
 		if (ret < 0)
-			goto err_pm_disable;
+			goto err_iommu_unregister;
 		writel_relaxed(0xffffffff, qcom_iommu->local_base + SMMU_INTR_SEL_NS);
 		pm_runtime_put_sync(dev);
 	}
 
 	return 0;
 
+err_iommu_unregister:
+	iommu_device_unregister(&qcom_iommu->iommu);
 err_sysfs_remove:
 	iommu_device_sysfs_remove(&qcom_iommu->iommu);
 err_pm_disable:
