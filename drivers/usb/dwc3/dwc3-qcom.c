@@ -16,6 +16,7 @@
 #include <linux/interconnect.h>
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
+#include <linux/regulator/consumer.h>
 #include <linux/phy/phy.h>
 #include <linux/usb/of.h>
 #include <linux/reset.h>
@@ -84,6 +85,9 @@ struct dwc3_qcom {
 	struct extcon_dev	*host_edev;
 	struct notifier_block	vbus_nb;
 	struct notifier_block	host_nb;
+	struct regulator	*vbus_reg;
+	struct work_struct	vbus_work;
+	bool			vbus_on;
 
 	enum usb_dr_mode	mode;
 	bool			is_suspended;
@@ -143,6 +147,39 @@ static int dwc3_qcom_vbus_notifier(struct notifier_block *nb,
 	return NOTIFY_DONE;
 }
 
+/* Supply VBUS to the port while the ID pin selects host mode */
+static void dwc3_qcom_vbus_work(struct work_struct *work)
+{
+	struct dwc3_qcom *qcom = container_of(work, struct dwc3_qcom, vbus_work);
+	struct extcon_dev *host_edev = qcom->host_edev ?: qcom->edev;
+	bool on = extcon_get_state(host_edev, EXTCON_USB_HOST) > 0;
+	int ret;
+
+	if (on == qcom->vbus_on)
+		return;
+
+	if (on)
+		ret = regulator_enable(qcom->vbus_reg);
+	else
+		ret = regulator_disable(qcom->vbus_reg);
+	if (ret) {
+		dev_err(qcom->dev, "failed to switch VBUS %s: %d\n",
+			on ? "on" : "off", ret);
+		return;
+	}
+
+	qcom->vbus_on = on;
+}
+
+static void dwc3_qcom_vbus_cleanup(void *data)
+{
+	struct dwc3_qcom *qcom = data;
+
+	cancel_work_sync(&qcom->vbus_work);
+	if (qcom->vbus_on)
+		regulator_disable(qcom->vbus_reg);
+}
+
 static int dwc3_qcom_host_notifier(struct notifier_block *nb,
 				   unsigned long event, void *ptr)
 {
@@ -151,6 +188,9 @@ static int dwc3_qcom_host_notifier(struct notifier_block *nb,
 	/* disable vbus override in host mode */
 	dwc3_qcom_vbus_override_enable(qcom, !event);
 	qcom->mode = event ? USB_DR_MODE_HOST : USB_DR_MODE_PERIPHERAL;
+
+	if (qcom->vbus_reg)
+		schedule_work(&qcom->vbus_work);
 
 	return NOTIFY_DONE;
 }
@@ -170,6 +210,19 @@ static int dwc3_qcom_register_extcon(struct dwc3_qcom *qcom)
 				     "Failed to get extcon\n");
 
 	qcom->vbus_nb.notifier_call = dwc3_qcom_vbus_notifier;
+
+	qcom->vbus_reg = devm_regulator_get_optional(dev, "vbus");
+	if (IS_ERR(qcom->vbus_reg)) {
+		if (PTR_ERR(qcom->vbus_reg) != -ENODEV)
+			return dev_err_probe(dev, PTR_ERR(qcom->vbus_reg),
+					     "Failed to get VBUS supply\n");
+		qcom->vbus_reg = NULL;
+	}
+	INIT_WORK(&qcom->vbus_work, dwc3_qcom_vbus_work);
+	/* Registered ahead of the notifiers so that it runs after they are gone */
+	ret = devm_add_action_or_reset(dev, dwc3_qcom_vbus_cleanup, qcom);
+	if (ret)
+		return ret;
 
 	qcom->host_edev = extcon_get_edev_by_phandle(dev, 1);
 	if (IS_ERR(qcom->host_edev))
@@ -201,6 +254,9 @@ static int dwc3_qcom_register_extcon(struct dwc3_qcom *qcom)
 		dwc3_qcom_vbus_notifier(&qcom->vbus_nb, true, qcom->edev);
 	else
 		dwc3_qcom_vbus_notifier(&qcom->vbus_nb, false, qcom->edev);
+
+	if (qcom->vbus_reg)
+		schedule_work(&qcom->vbus_work);
 
 	return 0;
 }
