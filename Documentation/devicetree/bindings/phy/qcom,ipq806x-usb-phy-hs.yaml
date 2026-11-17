@@ -16,7 +16,9 @@ description:
 
 properties:
   compatible:
-    const: qcom,ipq806x-usb-phy-hs
+    enum:
+      - qcom,ipq806x-usb-phy-hs
+      - qcom,msm8974-usb-phy-hs
 
   "#phy-cells":
     const: 0
@@ -34,12 +36,33 @@ properties:
       - const: ref
       - const: xo
 
+  v1p8-supply:
+    description: 1.8 V supply of the PHY
+
+  v3p3-supply:
+    description: 3.3 V supply of the PHY
+
 required:
   - compatible
   - "#phy-cells"
   - reg
   - clocks
   - clock-names
+
+allOf:
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: qcom,msm8974-usb-phy-hs
+    then:
+      required:
+        - v1p8-supply
+        - v3p3-supply
+    else:
+      properties:
+        v1p8-supply: false
+        v3p3-supply: false
 
 additionalProperties: false
 
