@@ -7,6 +7,7 @@
 #include <linux/of.h>
 #include <linux/phy/phy.h>
 #include <linux/platform_device.h>
+#include <linux/regulator/consumer.h>
 #include <linux/delay.h>
 #include <linux/regmap.h>
 #include <linux/mfd/syscon.h>
@@ -15,8 +16,12 @@
 /* USB QSCRATCH Hardware registers */
 #define QSCRATCH_GENERAL_CFG		(0x08)
 #define HSUSB_PHY_CTRL_REG		(0x10)
+#define HSUSB_PARAMETER_OVERRIDE_X	(0x14)
+#define HSUSB_PARAMETER_OVERRIDE_MASK	GENMASK(25, 0)
 
 /* PHY_CTRL_REG */
+#define HSUSB_CTRL_SW_SESSVLD_SEL	BIT(28)
+#define HSUSB_CTRL_MSM8974_BIT26	BIT(26)
 #define HSUSB_CTRL_DMSEHV_CLAMP		BIT(24)
 #define HSUSB_CTRL_USB2_SUSPEND		BIT(23)
 #define HSUSB_CTRL_UTMI_CLK_EN		BIT(21)
@@ -29,6 +34,11 @@
 #define HSUSB_CTRL_CLAMP_EN		BIT(7)
 #define HSUSB_CTRL_RETENABLEN		BIT(1)
 #define HSUSB_CTRL_POR			BIT(0)
+#define HSUSB_CTRL_FSEL_MSM8974		(0x30)
+
+/* VBUS override bits the DWC3 glue owns in the same register */
+#define HSUSB_CTRL_GLUE_MASK		(HSUSB_CTRL_SW_SESSVLD_SEL | \
+					 HSUSB_CTRL_UTMI_OTG_VBUS_VALID)
 
 /* QSCRATCH_GENERAL_CFG */
 #define HSUSB_GCFG_XHCI_REV		BIT(2)
@@ -120,6 +130,9 @@ struct usb_phy {
 	struct device		*dev;
 	struct clk		*xo_clk;
 	struct clk		*ref_clk;
+	struct regulator	*v1p8;
+	struct regulator	*v3p3;
+	const struct phy_drvdata *data;
 	u32			rx_eq;
 	u32			tx_deamp_3_5db;
 	u32			mpll;
@@ -128,6 +141,12 @@ struct usb_phy {
 struct phy_drvdata {
 	struct phy_ops	ops;
 	u32		clk_rate;
+	u32		hs_param_override;
+	bool		has_supplies;
+	u32		ss_tx_amplitude;
+	u32		ss_ctrl;
+	u32		ss_param_mask;
+	u32		ss_param_val;
 };
 
 /**
@@ -314,26 +333,47 @@ static int qcom_ipq806x_usb_ss_phy_init(struct phy *phy)
 		return ret;
 	}
 
-	/* reset phy */
-	data = readl(phy_dwc3->base + SSUSB_PHY_CTRL_REG);
-	writel(data | SSUSB_CTRL_SS_PHY_RESET,
-	       phy_dwc3->base + SSUSB_PHY_CTRL_REG);
-	usleep_range(2000, 2200);
-	writel(data, phy_dwc3->base + SSUSB_PHY_CTRL_REG);
+	if (phy_dwc3->data->ss_ctrl) {
+		/*
+		 * Reference from the pads first, then reset with the
+		 * reference running, then enable: the order and values of
+		 * the vendor driver.
+		 */
+		data = phy_dwc3->data->ss_ctrl;
+		writel(data, phy_dwc3->base + SSUSB_PHY_CTRL_REG);
+		msleep(30);
 
-	/* clear REF_PAD if we don't have XO clk */
-	if (!phy_dwc3->xo_clk)
-		data &= ~SSUSB_CTRL_REF_USE_PAD;
-	else
-		data |= SSUSB_CTRL_REF_USE_PAD;
+		writel(data | SSUSB_CTRL_SS_PHY_RESET,
+		       phy_dwc3->base + SSUSB_PHY_CTRL_REG);
+		usleep_range(2000, 2200);
+		writel(data, phy_dwc3->base + SSUSB_PHY_CTRL_REG);
+		usleep_range(2000, 2200);
 
-	writel(data, phy_dwc3->base + SSUSB_PHY_CTRL_REG);
+		data |= SSUSB_CTRL_SS_PHY_EN | SSUSB_CTRL_LANE0_PWR_PRESENT;
+		writel(data, phy_dwc3->base + SSUSB_PHY_CTRL_REG);
+		usleep_range(2000, 2200);
+	} else {
+		/* reset phy */
+		data = readl(phy_dwc3->base + SSUSB_PHY_CTRL_REG);
+		writel(data | SSUSB_CTRL_SS_PHY_RESET,
+		       phy_dwc3->base + SSUSB_PHY_CTRL_REG);
+		usleep_range(2000, 2200);
+		writel(data, phy_dwc3->base + SSUSB_PHY_CTRL_REG);
 
-	/* wait for ref clk to become stable, this can take up to 30ms */
-	msleep(30);
+		/* clear REF_PAD if we don't have XO clk */
+		if (!phy_dwc3->xo_clk)
+			data &= ~SSUSB_CTRL_REF_USE_PAD;
+		else
+			data |= SSUSB_CTRL_REF_USE_PAD;
 
-	data |= SSUSB_CTRL_SS_PHY_EN | SSUSB_CTRL_LANE0_PWR_PRESENT;
-	writel(data, phy_dwc3->base + SSUSB_PHY_CTRL_REG);
+		writel(data, phy_dwc3->base + SSUSB_PHY_CTRL_REG);
+
+		/* wait for ref clk to become stable, this can take up to 30ms */
+		msleep(30);
+
+		data |= SSUSB_CTRL_SS_PHY_EN | SSUSB_CTRL_LANE0_PWR_PRESENT;
+		writel(data, phy_dwc3->base + SSUSB_PHY_CTRL_REG);
+	}
 
 	/*
 	 * WORKAROUND: There is SSPHY suspend bug due to which USB enumerates
@@ -394,7 +434,7 @@ static int qcom_ipq806x_usb_ss_phy_init(struct phy *phy)
 	data &= ~TX_OVRD_DRV_LO_PREEMPH_MASK;
 	data |= TX_OVRD_DRV_LO_PREEMPH(phy_dwc3->tx_deamp_3_5db);
 	data &= ~TX_OVRD_DRV_LO_AMPLITUDE_MASK;
-	data |= 0x6E;
+	data |= phy_dwc3->data->ss_tx_amplitude;
 	data |= TX_OVRD_DRV_LO_EN;
 	ret = usb_ss_write_phycreg(phy_dwc3,
 				   SSPHY_CTRL_TX_OVRD_DRV_LO(0), data);
@@ -413,6 +453,14 @@ static int qcom_ipq806x_usb_ss_phy_init(struct phy *phy)
 	 * TX_DEEMPH_3_5DB [13:8] set based on SoC version
 	 * LOS_BIAS [7:3] to 9
 	 */
+	if (phy_dwc3->data->ss_param_mask) {
+		/* A SoC with its own PHY_PARAM_CTRL1 layout and values */
+		usb_phy_write_readback(phy_dwc3, SSUSB_PHY_PARAM_CTRL_1,
+				       phy_dwc3->data->ss_param_mask,
+				       phy_dwc3->data->ss_param_val);
+		return 0;
+	}
+
 	data = readl(phy_dwc3->base + SSUSB_PHY_PARAM_CTRL_1);
 
 	data &= ~PHY_PARAM_CTRL1_MASK;
@@ -451,6 +499,76 @@ static int qcom_ipq806x_usb_ss_phy_exit(struct phy *phy)
 	return 0;
 }
 
+/*
+ * MSM8974 keeps the HS PHY supplies switchable and wants the reference
+ * select, clamp and tuning values the vendor driver programs.  The DWC3 glue
+ * toggles its VBUS override bits in HSUSB_PHY_CTRL, so those are preserved.
+ */
+static int qcom_msm8974_usb_hs_phy_init(struct phy *phy)
+{
+	struct usb_phy *phy_dwc3 = phy_get_drvdata(phy);
+	int ret;
+	u32 val;
+
+	ret = regulator_enable(phy_dwc3->v1p8);
+	if (ret)
+		return ret;
+
+	ret = regulator_enable(phy_dwc3->v3p3);
+	if (ret)
+		goto err_1p8;
+
+	ret = clk_prepare_enable(phy_dwc3->xo_clk);
+	if (ret)
+		goto err_3p3;
+
+	ret = clk_prepare_enable(phy_dwc3->ref_clk);
+	if (ret)
+		goto err_xo;
+
+	val = readl(phy_dwc3->base + HSUSB_PHY_CTRL_REG);
+	val &= HSUSB_CTRL_GLUE_MASK;
+	/* Bit 26 is set by the vendor driver; its meaning is undocumented */
+	val |= HSUSB_CTRL_MSM8974_BIT26 | HSUSB_CTRL_DMSEHV_CLAMP |
+	       HSUSB_CTRL_UTMI_CLK_EN | HSUSB_CTRL_DPSEHV_CLAMP |
+	       HSUSB_CTRL_COMMONONN | HSUSB_CTRL_ID_HV_CLAMP |
+	       HSUSB_CTRL_OTGSESSVLD_CLAMP | HSUSB_CTRL_CLAMP_EN |
+	       HSUSB_CTRL_FSEL_MSM8974 | HSUSB_CTRL_RETENABLEN;
+	writel(val, phy_dwc3->base + HSUSB_PHY_CTRL_REG);
+	usleep_range(2000, 2200);
+
+	val = readl(phy_dwc3->base + QSCRATCH_GENERAL_CFG);
+	writel(val | HSUSB_GCFG_XHCI_REV,
+	       phy_dwc3->base + QSCRATCH_GENERAL_CFG);
+
+	val = readl(phy_dwc3->base + HSUSB_PARAMETER_OVERRIDE_X);
+	val &= ~HSUSB_PARAMETER_OVERRIDE_MASK;
+	val |= phy_dwc3->data->hs_param_override & HSUSB_PARAMETER_OVERRIDE_MASK;
+	writel(val, phy_dwc3->base + HSUSB_PARAMETER_OVERRIDE_X);
+
+	return 0;
+
+err_xo:
+	clk_disable_unprepare(phy_dwc3->xo_clk);
+err_3p3:
+	regulator_disable(phy_dwc3->v3p3);
+err_1p8:
+	regulator_disable(phy_dwc3->v1p8);
+	return ret;
+}
+
+static int qcom_msm8974_usb_hs_phy_exit(struct phy *phy)
+{
+	struct usb_phy *phy_dwc3 = phy_get_drvdata(phy);
+
+	clk_disable_unprepare(phy_dwc3->ref_clk);
+	clk_disable_unprepare(phy_dwc3->xo_clk);
+	regulator_disable(phy_dwc3->v3p3);
+	regulator_disable(phy_dwc3->v1p8);
+
+	return 0;
+}
+
 static const struct phy_drvdata qcom_ipq806x_usb_hs_drvdata = {
 	.ops = {
 		.init		= qcom_ipq806x_usb_hs_phy_init,
@@ -460,6 +578,17 @@ static const struct phy_drvdata qcom_ipq806x_usb_hs_drvdata = {
 	.clk_rate = 60000000,
 };
 
+static const struct phy_drvdata qcom_msm8974_usb_hs_drvdata = {
+	.ops = {
+		.init		= qcom_msm8974_usb_hs_phy_init,
+		.exit		= qcom_msm8974_usb_hs_phy_exit,
+		.owner		= THIS_MODULE,
+	},
+	.clk_rate = 60000000,
+	.hs_param_override = 0x00d191a4,
+	.has_supplies = true,
+};
+
 static const struct phy_drvdata qcom_ipq806x_usb_ss_drvdata = {
 	.ops = {
 		.init		= qcom_ipq806x_usb_ss_phy_init,
@@ -467,13 +596,35 @@ static const struct phy_drvdata qcom_ipq806x_usb_ss_drvdata = {
 		.owner		= THIS_MODULE,
 	},
 	.clk_rate = 125000000,
+	.ss_tx_amplitude = 0x6e,
+};
+
+/*
+ * MSM8974: TX_FULL_SWING [26:20] = 127, TX_DEEMPH_3_5DB [13:8] = 22 and
+ * LOS_BIAS [2:0] = 5, as the vendor driver programs them.
+ */
+static const struct phy_drvdata qcom_msm8974_usb_ss_drvdata = {
+	.ops = {
+		.init		= qcom_ipq806x_usb_ss_phy_init,
+		.exit		= qcom_ipq806x_usb_ss_phy_exit,
+		.owner		= THIS_MODULE,
+	},
+	.clk_rate = 125000000,
+	.ss_tx_amplitude = 0x7f,
+	.ss_ctrl = 0x10210002,
+	.ss_param_mask = 0x07f03f07,
+	.ss_param_val = 0x07f01605,
 };
 
 static const struct of_device_id qcom_ipq806x_usb_phy_table[] = {
 	{ .compatible = "qcom,ipq806x-usb-phy-hs",
 	  .data = &qcom_ipq806x_usb_hs_drvdata },
+	{ .compatible = "qcom,msm8974-usb-phy-hs",
+	  .data = &qcom_msm8974_usb_hs_drvdata },
 	{ .compatible = "qcom,ipq806x-usb-phy-ss",
 	  .data = &qcom_ipq806x_usb_ss_drvdata },
+	{ .compatible = "qcom,msm8974-usb-phy-ss",
+	  .data = &qcom_msm8974_usb_ss_drvdata },
 	{ /* Sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, qcom_ipq806x_usb_phy_table);
@@ -518,6 +669,17 @@ static int qcom_ipq806x_usb_phy_probe(struct platform_device *pdev)
 	if (IS_ERR(phy_dwc3->xo_clk)) {
 		dev_dbg(phy_dwc3->dev, "cannot get TCXO clock\n");
 		phy_dwc3->xo_clk = NULL;
+	}
+
+	phy_dwc3->data = data;
+	if (data->has_supplies) {
+		phy_dwc3->v1p8 = devm_regulator_get(phy_dwc3->dev, "v1p8");
+		if (IS_ERR(phy_dwc3->v1p8))
+			return PTR_ERR(phy_dwc3->v1p8);
+
+		phy_dwc3->v3p3 = devm_regulator_get(phy_dwc3->dev, "v3p3");
+		if (IS_ERR(phy_dwc3->v3p3))
+			return PTR_ERR(phy_dwc3->v3p3);
 	}
 
 	/* Parse device node to probe HSIO settings */
