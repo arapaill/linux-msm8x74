@@ -1,12 +1,17 @@
 name: stable-sync
 
 # Keep the integration branches of every maintained series up to date with
-# their mainline LTS branch. Two series are maintained in parallel (AGENTS.md
-# section 1): 6.12 (production baseline, display works via the drm/msm vram
-# carveout) and 6.18 (LTS-tracking work, display unsolved - see
-# docs/reports/6.18-display-findings.md). Clean merges are pushed directly; a conflict
-# opens an issue and leaves the branch untouched (resolve it manually on
-# a topic/integration round). See AGENTS.md §5.
+# their mainline LTS branch (AGENTS.md section 5). Clean merges are pushed
+# directly. A conflict fails that branch's job, names the conflicting files
+# and leaves the branch untouched: resolve it by hand (merge stable into the
+# branch, fix the conflict, push). Each branch is synced independently, so a
+# conflict on one never holds back the others.
+#
+# A push made with GITHUB_TOKEN does not trigger other workflows, so
+# notify-kernel-build never sees these merges: after a merge into an rc
+# branch this workflow asks citronics-kernel to build the packages itself.
+# That needs the KERNEL_DISPATCH_TOKEN secret, a token allowed to send
+# repository_dispatch to Citronics/citronics-kernel (Contents: write).
 
 on:
   schedule:
@@ -15,7 +20,6 @@ on:
 
 permissions:
   contents: write
-  issues: write
 
 concurrency:
   group: stable-sync
@@ -23,8 +27,9 @@ concurrency:
 
 jobs:
   sync:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     strategy:
+      fail-fast: false
       max-parallel: 1        # one branch at a time, never in parallel
       matrix:
         include:
@@ -58,36 +63,43 @@ jobs:
         run: |
           git config user.name  "stable-sync bot"
           git config user.email "stable-sync@users.noreply.github.com"
-          BEFORE=$(git rev-parse HEAD)
           STABLE=$(git rev-parse FETCH_HEAD)
-          STABLE_DESC=$(git describe --tags "$STABLE" 2>/dev/null || echo "$STABLE")
-          echo "stable_desc=$STABLE_DESC" >> "$GITHUB_OUTPUT"
           if git merge-base --is-ancestor "$STABLE" HEAD; then
+            echo "Already up to date with ${{ matrix.stable }}."
             echo "result=up-to-date" >> "$GITHUB_OUTPUT"
-            echo "Already contains $STABLE_DESC — nothing to do."
             exit 0
           fi
-          if git merge --no-edit -m "Merge stable $STABLE_DESC into ${{ matrix.branch }}" FETCH_HEAD; then
+          # The fetch has no tags, so name the merge after the Makefile version
+          VERSION=$(git show "$STABLE:Makefile" | awk -F' = ' '
+            /^VERSION =/ {v=$2} /^PATCHLEVEL =/ {p=$2} /^SUBLEVEL =/ {s=$2}
+            END {print v "." p "." s}')
+          if git merge --no-edit -m "Merge stable Linux $VERSION into ${{ matrix.branch }}" "$STABLE"; then
+            git log --oneline -1
             echo "result=merged" >> "$GITHUB_OUTPUT"
-            git log --oneline "$BEFORE..HEAD" | head -20
           else
+            CONFLICTS=$(git diff --name-only --diff-filter=U | tr '\n' ' ')
             git merge --abort
-            echo "result=conflict" >> "$GITHUB_OUTPUT"
+            echo "::error title=stable-sync conflict on ${{ matrix.branch }}::Merging Linux $VERSION conflicts in: $CONFLICTS. The branch was left untouched; merge ${{ matrix.stable }} into it by hand."
+            exit 1
           fi
 
       - name: Push
         if: steps.merge.outputs.result == 'merged'
         run: git push origin HEAD:${{ matrix.branch }}
 
-      - name: Open conflict issue
-        if: steps.merge.outputs.result == 'conflict'
+      - name: Request the kernel package build
+        if: steps.merge.outputs.result == 'merged' && endsWith(matrix.branch, '/rc')
         env:
-          GH_TOKEN: ${{ github.token }}
+          KERNEL_DISPATCH_TOKEN: ${{ secrets.KERNEL_DISPATCH_TOKEN }}
         run: |
-          TITLE="stable-sync: conflict merging ${{ steps.merge.outputs.stable_desc }} into ${{ matrix.branch }}"
-          if gh issue list --state open --search "$TITLE" --json title -q '.[].title' | grep -qF "$TITLE"; then
-            echo "Issue already open."
-          else
-            gh issue create --title "$TITLE" --body \
-              "Automated merge of stable \`${{ matrix.stable }}\` (${{ steps.merge.outputs.stable_desc }}) into \`${{ matrix.branch }}\` hit conflicts and was aborted. Resolve manually per AGENTS.md §5, then re-run the workflow."
+          if [ -z "$KERNEL_DISPATCH_TOKEN" ]; then
+            echo "::error::KERNEL_DISPATCH_TOKEN is not set: ${{ matrix.branch }} moved but no kernel package build was requested."
+            exit 1
           fi
+          SHA=$(git rev-parse HEAD)
+          curl -sSf -X POST \
+            -H "Authorization: Bearer $KERNEL_DISPATCH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/Citronics/citronics-kernel/dispatches \
+            -d "{\"event_type\":\"kernel-rc-updated\",\"client_payload\":{\"branch\":\"${{ matrix.branch }}\",\"sha\":\"$SHA\"}}"
+          echo "Requested a citronics-kernel build for ${{ matrix.branch }} at $SHA."
