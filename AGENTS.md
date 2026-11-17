@@ -69,8 +69,9 @@ Rules:
   display-on (`qcom-msm8974pro-fairphone-fp2.dtb`) and headless
   (`…-fairphone-fp2-headless.dtb`) device trees; the bootloader picks one.
   Never fork a branch just to toggle a board option.
-- **What each consumer builds:** citronics-kernel (Debian/Ubuntu try-out) →
-  `<kver>/rc`; stable → `<kver>/release`. buildroot → `<kver>/rc` or
+- **What each consumer builds:** citronics-kernel builds `<kver>/rc` into the
+  APT `experimental` component (try-out) and `6.12/release` into `main`, the
+  kernel Debian/Ubuntu devices run. buildroot → `<kver>/rc` or
   `<kver>/release` (headless DTB selected at build time). Repoint those
   recipes at the new names before deleting any legacy branch.
 
@@ -248,12 +249,13 @@ after hours of mainline-side theorizing.
 
 Every maintained integration branch is kept up to date with its own mainline
 LTS branch automatically by `.github/workflows/stable-sync.yml` (scheduled):
-`6.12/{baseline,staging,rc}` from `linux-6.12.y` and
+`6.12/{baseline,staging,rc,release}` from `linux-6.12.y` and
 `6.18/{baseline,staging,rc}` from `linux-6.18.y`. It fetches the stable branch
 and merges it, pushing on a clean merge. A conflict fails that branch's job,
 names the files and leaves the branch untouched: merge stable into it by hand.
-After a merge into an `rc` branch it requests the citronics-kernel package
-build itself (its pushes cannot trigger notify-kernel-build). Rationale:
-security fixes must not wait for the next manual integration round; a stable
-merge is the one case where `rc` moves without a full §1.1 revalidation —
-follow up with an on-device check when convenient.
+After a merge into an `rc` branch or `6.12/release` it requests the
+citronics-kernel package build itself (its pushes cannot trigger
+notify-kernel-build). Rationale: security fixes must not wait for the next
+manual integration round; a stable merge is the one case where `rc` and
+`release` move without a full §1.1 revalidation — follow up with an
+on-device check when convenient.
